@@ -199,12 +199,11 @@ void LocatorNode::poseCallback(
   // send map to odom transform
 
   geometry_msgs::msg::TransformStamped map_to_odom;
-  map_to_odom.header.frame_id = global_frame_id_.empty() ? pose->header.frame_id : global_frame_id_;
-  map_to_odom.header.stamp = tf2_ros::toMsg(
-    tf2_ros::fromMsg(pose->header.stamp) + transform_tolerance_);
-  map_to_odom.child_frame_id = odom_frame_id_;
-  tf2::impl::Converter<false, true>::convert(
-    odom_to_map_.inverse(), map_to_odom.transform);
+  map_to_odom.child_frame_id = global_frame_id_.empty() ? pose->header.frame_id : global_frame_id_;
+  map_to_odom.header.stamp =
+      tf2_ros::toMsg(tf2_ros::fromMsg(pose->header.stamp) + transform_tolerance_);
+  map_to_odom.header.frame_id = odom_frame_id_;
+  tf2::impl::Converter<false, true>::convert(odom_to_map_, map_to_odom.transform);
   tf_broadcaster_->sendTransform(map_to_odom);
 }
 
