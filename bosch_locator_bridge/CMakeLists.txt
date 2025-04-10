@@ -45,6 +45,9 @@ set(msg_files
     "msg/ClientLocalizationVisualization.msg"
     "msg/ClientMapVisualization.msg"
     "msg/ClientRecordingVisualization.msg"
+    "msg/NetStats.msg"
+    "msg/DockerStats.msg"
+    "msg/SystemStats.msg"
 )
 
 set(srv_files
