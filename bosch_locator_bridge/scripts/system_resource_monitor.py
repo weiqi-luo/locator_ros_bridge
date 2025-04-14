@@ -16,98 +16,65 @@ from scapy.all import sniff, IP
 from collections import defaultdict
 
 
-def create_stats_table(container_stats):
+def create_stats_table(container_stats, net_stats):
     """Create formatted table data from container stats
 
     Args:
         container_stats (list): List of DockerStats messages
 
     Returns:
-        tuple: (headers, table_data) for tabulate
+        tuple: (headers, table_data_docker) for tabulate
     """
     # Define table headers
-    headers = [
+    headers_docker = [
         "CONTAINER",
         "CPU %",
         "MEM %",
         "BLOCK INPUT (MiB)",
         "BLOCK OUTPUT (MiB)",
-        "INTERFACE",
-        "RX (MiB)",
-        "TX (MiB)",
-        "RX RATE (B/s)",
-        "TX RATE (B/s)",
     ]
 
     # Create table data
-    table_data = []
+    table_data_docker = []
 
     # Sort container stats by name
     sorted_stats = sorted(container_stats, key=lambda x: x.container_name.lower())
 
     for stat in sorted_stats:
-        if not stat.net_stats:
-            table_data.append(
-                [
-                    stat.container_name,
-                    f"{stat.cpu_percentage:.2f}%",
-                    f"{stat.memory_percent:.2f}%",
-                    f"{stat.block_input:.2f}",
-                    f"{stat.block_output:.2f}",
-                    "none",
-                    "none",
-                    "none",
-                    "none",
-                    "none",
-                ]
-            )
-        else:
-            sorted_net_stats = sorted(stat.net_stats, key=lambda x: x.interface.lower())
-            for net_stat in sorted_net_stats:
-                table_data.append(
-                    [
-                        stat.container_name,
-                        f"{stat.cpu_percentage:.2f}%",
-                        f"{stat.memory_percent:.2f}%",
-                        f"{stat.block_input:.2f}",
-                        f"{stat.block_output:.2f}",
-                        net_stat.interface,
-                        f"{net_stat.rx_mib:.2f}",
-                        f"{net_stat.tx_mib:.2f}",
-                        f"{net_stat.rx_bandwidth:.2f}",
-                        f"{net_stat.tx_bandwidth:.2f}",
-                    ]
-                )
-
-    return headers, table_data
-
-
-def format_table(headers, table_data):
-    """Format table using tabulate with consistent styling
-
-    Args:
-        headers (list): Table headers
-        table_data (list): Table data rows
-
-    Returns:
-        str: Formatted table string
-    """
-    return tabulate(
-        table_data,
-        headers=headers,
-        tablefmt="grid",
-        colalign=(
-            "left",
-            "right",
-            "right",
-            "right",
-            "right",
-            "right",
-            "right",
-            "right",
-        ),
-        maxcolwidths=[30, 8, 8, 12, 12, 12, 12, 12],
-    )
+        table_data_docker.append(
+            [
+                stat.container_name,
+                f"{stat.cpu_percentage:.2f}%",
+                f"{stat.memory_percent:.2f}%",
+                f"{stat.block_input:.2f}",
+                f"{stat.block_output:.2f}",
+            ]
+        )
+        
+    headers_net = [
+        "INTERFACE",
+        "TARGET IP",
+        "RX (MiB)",
+        "TX (MiB)",
+        "RX RATE (B/s)",
+        "TX RATE (B/s)",
+        "PEAK RX (B/s)",
+        "PEAK TX (B/s)",
+    ]
+    
+    table_data_net = [
+        [
+            net_stats.interface,
+            net_stats.target_ip,
+            f"{net_stats.rx_mib:.2f}",
+            f"{net_stats.tx_mib:.2f}",
+            f"{net_stats.rx_rate:.2f}",
+            f"{net_stats.tx_rate:.2f}",
+            f"{net_stats.rx_rate_peak:.2f}",
+            f"{net_stats.tx_rate_peak:.2f}",
+        ]
+    ]  
+    return headers_docker, headers_net, table_data_docker, table_data_net
 
 
 def format_bytes(bytes_value):
@@ -127,39 +94,6 @@ def format_bandwidth(bytes_per_sec):
         bytes_per_sec /= 1024
     return f"{bytes_per_sec:.2f}TB"
 
-
-def parse_bandwidth_value(value_str):
-    """Parse bandwidth values like '52B', '1.5Kb', etc."""
-    try:
-        if not value_str:
-            return 0.0
-        
-        # Extract number and unit
-        match = re.match(r'([\d.]+)([KMGkMGT]?[Bb])?', value_str)
-        if not match:
-            return 0.0
-            
-        value = float(match.group(1))
-        unit = (match.group(2) or 'B').upper()
-        
-        # Convert to bytes
-        multipliers = {
-            'B': 1,
-            'KB': 1024,
-            'MB': 1024**2,
-            'GB': 1024**3,
-            'TB': 1024**4
-        }
-        
-        # Handle both 'B' and 'b' (bytes vs bits)
-        if unit.endswith('B'):
-            return value * multipliers.get(unit, 1)
-        else:  # Convert bits to bytes
-            return (value * multipliers.get(unit.replace('b', 'B'), 1)) / 8
-                
-    except Exception as e:
-        print(f"Error parsing bandwidth value '{value_str}': {e}")
-        return 0.0
 
 def calculate_cpu_percent(d):
     """Get CPU percentage safely"""
@@ -226,89 +160,12 @@ def get_block_io_stats(stats):
     return block_stats["read"], block_stats["write"]
 
 
-def create_net_stats(interface, curr_rx_bytes, curr_tx_bytes, rx_rate, tx_rate):
-    """Create NetStats message"""
-    return NetStats(
-        interface=interface,
-        rx_mib=curr_rx_bytes / (1024 * 1024),
-        tx_mib=curr_tx_bytes / (1024 * 1024),
-        rx_bandwidth=rx_rate,
-        tx_bandwidth=tx_rate,
-    )
-
-
-def create_docker_stats(
-    container_name, stats, cpu_percent, mem_percent, block_io, net_stats
-):
-    """Create DockerStats message"""
-    return DockerStats(
-        container_name=container_name,
-        cpu_percentage=float(cpu_percent),
-        memory_percent=float(mem_percent),
-        block_input=block_io[0],
-        block_output=block_io[1],
-        pids=stats.get("pids_stats", {}).get("current", 0),
-        net_stats=net_stats,
-    )
-
-
-def get_network_stats(stats, container_name, current_time, previous_stats):
-    """Get network stats for all interfaces"""
-    networks = stats.get("networks", {})
-    net_stats_list = []
-
-    for interface, net_data in networks.items():
-        curr_rx_bytes = float(net_data.get("rx_bytes", 0))
-        curr_tx_bytes = float(net_data.get("tx_bytes", 0))
-
-        # Calculate rates
-        if container_name not in previous_stats:
-            previous_stats[container_name] = {}
-        if interface not in previous_stats[container_name]:
-            previous_stats[container_name][interface] = None
-            rx_rate = tx_rate = 0.0
-        else:
-            prev = previous_stats[container_name][interface]
-            if prev:
-                prev_time, prev_rx_bytes, prev_tx_bytes = prev
-                time_diff = current_time - prev_time
-                if time_diff > 0:
-                    rx_rate = max(
-                        0.0, float((curr_rx_bytes - prev_rx_bytes) / time_diff)
-                    )
-                    tx_rate = max(
-                        0.0, float((curr_tx_bytes - prev_tx_bytes) / time_diff)
-                    )
-                else:
-                    rx_rate = tx_rate = 0.0
-            else:
-                rx_rate = tx_rate = 0.0
-
-        # Store current stats for next calculation
-        previous_stats[container_name][interface] = (
-            current_time,
-            curr_rx_bytes,
-            curr_tx_bytes,
-        )
-
-        # Create NetStats with just the interface name
-        net_stat = create_net_stats(
-            interface=interface,
-            curr_rx_bytes=curr_rx_bytes,
-            curr_tx_bytes=curr_tx_bytes,
-            rx_rate=rx_rate,
-            tx_rate=tx_rate,
-        )
-        net_stats_list.append(net_stat)
-
-    return net_stats_list
-
-
 class DockerStatsCollector:
     def __init__(self):
         self.docker_client = docker.DockerClient(base_url="unix://var/run/docker.sock")
         self.previous_stats = {}
-
+        self._shutdown = False
+        
     def collect_stats(self):
         """Collect stats for all containers"""
         try:
@@ -317,22 +174,13 @@ class DockerStatsCollector:
             
             for container in containers:
                 stats = container.stats(stream=False)
-                current_time = time.time()
-
-                cpu_percent = calculate_cpu_percent(stats)
-                mem_percent = calculate_memory_percent(stats)
                 block_io = get_block_io_stats(stats)
-                net_stats = get_network_stats(
-                    stats, container.name, current_time, self.previous_stats
-                )
-
-                container_stats.append(create_docker_stats(
+                container_stats.append(DockerStats(
                     container_name=container.name,
-                    stats=stats,
-                    cpu_percent=cpu_percent,
-                    mem_percent=mem_percent,
-                    block_io=block_io,
-                    net_stats=net_stats,
+                    cpu_percentage=calculate_cpu_percent(stats),
+                    memory_percent=calculate_memory_percent(stats),
+                    block_input=block_io[0],
+                    block_output=block_io[1],
                 ))
             
             return container_stats
@@ -343,6 +191,7 @@ class DockerStatsCollector:
 
     def cleanup(self):
         """Cleanup resources"""
+        self._shutdown = True
         try:
             self.docker_client.close()
         except:
@@ -354,19 +203,15 @@ class NetworkMonitor:
         self.interface = interface
         self.local_ip = local_ip
         self.target_ip = target_ip
-        # Current interval counters
         self.rx_bytes = 0
         self.tx_bytes = 0
-        # Peak rates
         self.peak_rx_rate = 0.0
         self.peak_tx_rate = 0.0
-        # Real-time rates
-        self.realtime_rx_rate = 0.0
-        self.realtime_tx_rate = 0.0
+        self.rx_rate = 0.0
+        self.tx_rate = 0.0
         self.last_time = time.time()
-        self.last_realtime_check = time.time()
-        self._running = True
-
+        self._shutdown = False
+        
     def packet_callback(self, pkt):
         """Process each captured packet and update counters"""
         if IP in pkt:
@@ -395,7 +240,7 @@ class NetworkMonitor:
                 iface=self.interface,
                 prn=self.packet_callback,
                 filter=f"host {self.target_ip} and host {self.local_ip}",
-                timeout=1  # Capture for 1 second
+                timeout=5  # Capture for 1 second
             )
             
             current_time = time.time()
@@ -414,25 +259,34 @@ class NetworkMonitor:
             self.tx_bytes = 0
             self.last_time = current_time
             
-            return (rx_rate, tx_rate, self.peak_rx_rate, self.peak_tx_rate)
+            # Return a list containing single NetStats message
+            return NetStats(
+                interface=self.interface,
+                target_ip=self.target_ip,  # Add target_ip
+                rx_mib=rx_rate / (1024 * 1024),  # Convert to MiB
+                tx_mib=tx_rate / (1024 * 1024),  # Convert to MiB
+                rx_rate=rx_rate,
+                tx_rate=tx_rate,
+                rx_rate_peak=self.peak_rx_rate,
+                tx_rate_peak=self.peak_tx_rate,
+            )
             
         except Exception as e:
             print(f"Stats collection error: {e}")
-            return (0.0, 0.0, 0.0, 0.0)
+            return None
 
     def cleanup(self):
-        """No cleanup needed"""
-        pass
+        self._shutdown = True
 
 
 def collector_process(collector, queue, interval):
     """Generic collector process function"""
-    while True:
+    while rclpy.ok():
         try:
             stats = collector.collect_stats()
             queue.put(stats)
-            time.sleep(interval)
-            print(f"Collector process stats: {stats}, time: {time.time()}")
+            # time.sleep(interval)
+            # print(f"Collector process stats: {stats}, time: {time.time()}")
         except Exception as e:
             print(f"Collector process error: {e}")
             time.sleep(interval)
@@ -440,8 +294,8 @@ def collector_process(collector, queue, interval):
 
 class SystemResourceMonitor(Node):
     def __init__(self, local_ip, target_ip, interface, update_interval):
-        super().__init__("docker_stats_monitor")
-        self.publisher = self.create_publisher(SystemStats, "docker_stats", 10)
+        super().__init__("system_resource_monitor")
+        self.publisher = self.create_publisher(SystemStats, "system_stats", 10)
         self._shutdown = False
         
         # Create collectors
@@ -462,55 +316,57 @@ class SystemResourceMonitor(Node):
             args=(self.network_monitor, self.network_queue, update_interval)
         )
         
-        # self.docker_process.start()
+        self.docker_process.start()
         self.network_process.start()
         
         # Create timer for publishing only
         self.publish_timer = self.create_timer(update_interval, self.publish_stats)
         
-        # Store latest stats
-        self.latest_docker_stats = []
-        self.latest_bandwidth = (0.0, 0.0, 0.0, 0.0)  # rx, tx, peak_rx, peak_tx
+        # Initialize latest stats as empty lists
+        self.latest_docker_stats = None
+        self.latest_net_stats = None
 
     def publish_stats(self):
         """Non-blocking publish method that reads from queues"""
         try:
             # Get latest docker stats if available
             while not self.docker_queue.empty():
-                self.latest_docker_stats = self.docker_queue.get_nowait()
+                stats = self.docker_queue.get_nowait()
+                self.latest_docker_stats = stats if stats and len(stats) > 0 else None
                 
             # Get latest bandwidth stats if available
             while not self.network_queue.empty():
-                self.latest_bandwidth = self.network_queue.get_nowait()
+                stats = self.network_queue.get_nowait()
+                # Only take the first NetStats object since we expect a list with one item
+                self.latest_net_stats = stats if stats else None
             
             # Create and publish message
-            sys_msg = SystemStats()
-            sys_msg.header.stamp = self.get_clock().now().to_msg()
-            sys_msg.header.frame_id = "docker_stats"
-            sys_msg.docker_stats = self.latest_docker_stats
-            self.publisher.publish(sys_msg)
+            if self.latest_net_stats and self.latest_docker_stats:
+                sys_msg = SystemStats()
+                sys_msg.header.stamp = self.get_clock().now().to_msg()
+                sys_msg.docker_stats = self.latest_docker_stats or []
+                sys_msg.net_stats = [self.latest_net_stats]
+                self.publisher.publish(sys_msg)
 
-            if isinstance(self.latest_bandwidth, tuple) and len(self.latest_bandwidth) == 4:
-                rx_rate, tx_rate, peak_rx, peak_tx = self.latest_bandwidth
-                # Add peak rates to your message or handle as needed
+                headers_docker, headers_net, table_data_docker, table_data_net = \
+                    create_stats_table(self.latest_docker_stats, self.latest_net_stats)
+                print("\033[2J\033[H", end="")  # Clear screen and move cursor to top
+                print(f"System Stats - Updated: {time.strftime('%H:%M:%S')}")
+                print("=" * 100)
+                print(tabulate(table_data_docker, headers=headers_docker, tablefmt="grid"))
+                print(tabulate(table_data_net, headers=headers_net, tablefmt="grid"))
                 
-            # Only display stats if we have data
-            # if self.latest_docker_stats:
-            #     headers, table_data = create_stats_table(self.latest_docker_stats)
-            #     print(f"System Stats - Updated: {time.strftime('%H:%M:%S')}")
-            #     print("=" * 100)
-            #     print(format_table(headers, table_data))
-                
-            # if isinstance(self.latest_bandwidth, tuple) and len(self.latest_bandwidth) == 2:
-                # print(f"Bandwidth - RX: {format_bandwidth(self.latest_bandwidth[0])}/s, "
-                #       f"TX: {format_bandwidth(self.latest_bandwidth[1])}/s")
-            # else:
-            #     print("Bandwidth data not available yet")
+            # Update network stats display
+            if self.latest_net_stats:
+                print(f"Bandwidth - RX: {format_bandwidth(self.latest_net_stats.rx_rate)}/s, "
+                      f"TX: {format_bandwidth(self.latest_net_stats.tx_rate)}/s")
+            else:
+                print("Bandwidth data not available yet")
             
         except Exception as e:
             self.get_logger().error(f'Error publishing stats: {str(e)}')
-            self.get_logger().debug(f'Docker stats length: {len(self.latest_docker_stats)}')
-            self.get_logger().debug(f'Bandwidth data: {self.latest_bandwidth}')
+            self.get_logger().debug(f'Docker stats length: {len(self.latest_docker_stats) if self.latest_docker_stats else 0}')
+            self.get_logger().debug(f'Network stats available: {self.latest_net_stats is not None}')
 
     def destroy_node(self):
         """Clean up processes when shutting down"""
@@ -527,6 +383,7 @@ class SystemResourceMonitor(Node):
             
             # Cleanup collectors
             self.docker_collector.cleanup()
+            self.network_monitor.cleanup()
             
             # Cancel publish timer
             self.publish_timer.cancel()

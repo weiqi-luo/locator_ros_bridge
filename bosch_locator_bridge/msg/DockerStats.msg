@@ -5,4 +5,3 @@ float32 memory_percent           # Memory usage percentage
 float64 block_input     # Block input in MiB
 float64 block_output    # Block output in MiB
 int32 pids              # Number of processes/threads
-NetStats[] net_stats
