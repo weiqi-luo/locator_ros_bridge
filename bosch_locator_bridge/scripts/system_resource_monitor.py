@@ -5,7 +5,7 @@ import concurrent.futures
 import rclpy
 from rclpy.node import Node
 from bosch_locator_bridge.msg import NetStats, DockerStats, SystemStats
-from std_msgs.msg import HeaderX``w
+from std_msgs.msg import Header
 import subprocess
 import re
 import threading
