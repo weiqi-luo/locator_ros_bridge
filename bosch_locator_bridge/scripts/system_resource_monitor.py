@@ -16,15 +16,10 @@ from scapy.all import sniff, IP
 from collections import defaultdict
 
 
-def create_stats_table(container_stats, net_stats):
-    """Create formatted table data from container stats
-
-    Args:
-        container_stats (list): List of DockerStats messages
-
-    Returns:
-        tuple: (headers, table_data_docker) for tabulate
-    """
+def print_docker_stats_table(container_stats):
+    if container_stats is None:
+        print("No docker stats available")
+        return
     # Define table headers
     headers_docker = [
         "CONTAINER",
@@ -33,13 +28,10 @@ def create_stats_table(container_stats, net_stats):
         "BLOCK INPUT (MiB)",
         "BLOCK OUTPUT (MiB)",
     ]
-
-    # Create table data
-    table_data_docker = []
-
     # Sort container stats by name
     sorted_stats = sorted(container_stats, key=lambda x: x.container_name.lower())
-
+    # Create table data
+    table_data_docker = []
     for stat in sorted_stats:
         table_data_docker.append(
             [
@@ -50,31 +42,33 @@ def create_stats_table(container_stats, net_stats):
                 f"{stat.block_output:.2f}",
             ]
         )
+    print(tabulate(table_data_docker, headers=headers_docker, tablefmt="grid"))
         
+def print_net_stats_table(net_stats):
+    if net_stats is None:
+        print("No network stats available")
+        return
+    # Create table data for network stats
     headers_net = [
         "INTERFACE",
         "TARGET IP",
-        "RX (MiB)",
-        "TX (MiB)",
-        "RX RATE (B/s)",
-        "TX RATE (B/s)",
-        "PEAK RX (B/s)",
-        "PEAK TX (B/s)",
+        "RX",
+        "TX",
+        "RX RATE",
+        "TX RATE",
     ]
     
     table_data_net = [
         [
-            net_stats.interface,
-            net_stats.target_ip,
-            f"{net_stats.rx_mib:.2f}",
-            f"{net_stats.tx_mib:.2f}",
-            f"{net_stats.rx_rate:.2f}",
-            f"{net_stats.tx_rate:.2f}",
-            f"{net_stats.rx_rate_peak:.2f}",
-            f"{net_stats.tx_rate_peak:.2f}",
+            net_stats[0].interface,
+            net_stats[0].target_ip,
+            format_bytes(net_stats[0].rx_bytes),
+            format_bytes(net_stats[0].tx_bytes),
+            format_bandwidth(net_stats[0].rx_rate) + '/s',
+            format_bandwidth(net_stats[0].tx_rate) + '/s',
         ]
     ]  
-    return headers_docker, headers_net, table_data_docker, table_data_net
+    print(tabulate(table_data_net, headers=headers_net, tablefmt="grid"))
 
 
 def format_bytes(bytes_value):
@@ -140,7 +134,7 @@ def calculate_memory_percent(stats):
         return 0.0
 
     usage = calculate_memory_usage(stats)
-    mem_limit = mem_stats.get("limit", 1)  # Default to 1 to avoid division by zero
+    mem_limit = mem_stats.get("limit", 0)
 
     return (usage / mem_limit) * 100 if mem_limit > 0 else 0.0
 
@@ -162,17 +156,23 @@ def get_block_io_stats(stats):
 
 class DockerStatsCollector:
     def __init__(self):
-        self.docker_client = docker.DockerClient(base_url="unix://var/run/docker.sock")
-        self.previous_stats = {}
+        self.docker_client = docker.DockerClient(
+            base_url="unix://var/run/docker.sock",
+            timeout=5  # Add timeout for API calls
+        )
         self._shutdown = False
-        
+
     def collect_stats(self):
         """Collect stats for all containers"""
+        if self._shutdown:  # Check shutdown flag
+            return None
         try:
             containers = sorted(self.docker_client.containers.list(), key=lambda x: x.name)
             container_stats = []
             
             for container in containers:
+                if self._shutdown:  # Check shutdown flag in loop
+                    return None
                 stats = container.stats(stream=False)
                 block_io = get_block_io_stats(stats)
                 container_stats.append(DockerStats(
@@ -182,12 +182,11 @@ class DockerStatsCollector:
                     block_input=block_io[0],
                     block_output=block_io[1],
                 ))
-            
             return container_stats
             
         except Exception as e:
             print(f"Docker stats collection error: {e}")
-            return []
+            return None
 
     def cleanup(self):
         """Cleanup resources"""
@@ -203,13 +202,10 @@ class NetworkMonitor:
         self.interface = interface
         self.local_ip = local_ip
         self.target_ip = target_ip
-        self.rx_bytes = 0
-        self.tx_bytes = 0
-        self.peak_rx_rate = 0.0
-        self.peak_tx_rate = 0.0
-        self.rx_rate = 0.0
-        self.tx_rate = 0.0
-        self.last_time = time.time()
+        self.rx_bytes_total = 0.0  # Total bytes since start
+        self.tx_bytes_total = 0.0  # Total bytes since start
+        self.rx_bytes_window = 0.0  # Bytes in current 1-second window
+        self.tx_bytes_window = 0.0  # Bytes in current 1-second window
         self._shutdown = False
         
     def packet_callback(self, pkt):
@@ -219,9 +215,10 @@ class NetworkMonitor:
             
             # Get packet direction and size
             if pkt[IP].src == self.local_ip and pkt[IP].dst == self.target_ip:
-                self.tx_bytes += packet_size
+                self.tx_bytes_window += packet_size
             elif pkt[IP].src == self.target_ip and pkt[IP].dst == self.local_ip:
-                self.rx_bytes += packet_size
+                self.rx_bytes_window += packet_size
+            
             
             # Format packet info for debugging
             # direction = "TX" if pkt[IP].src == self.local_ip else "RX"
@@ -235,40 +232,28 @@ class NetworkMonitor:
     def collect_stats(self):
         """Collect bandwidth stats using scapy"""
         try:
-            # Capture packets for the interval
+            # Reset window counters before capture
+            self.rx_bytes_window = 0.0
+            self.tx_bytes_window = 0.0
+            
             sniff(
                 iface=self.interface,
                 prn=self.packet_callback,
                 filter=f"host {self.target_ip} and host {self.local_ip}",
-                timeout=5  # Capture for 1 second
+                timeout=1  # Capture for 1 second
             )
             
-            current_time = time.time()
-            time_diff = current_time - self.last_time
+            # Update totals
+            self.rx_bytes_total += self.rx_bytes_window
+            self.tx_bytes_total += self.tx_bytes_window
             
-            # Calculate rates
-            rx_rate = self.rx_bytes / time_diff if time_diff > 0 else 0
-            tx_rate = self.tx_bytes / time_diff if time_diff > 0 else 0
-            
-            # Update peak rates
-            self.peak_rx_rate = max(self.peak_rx_rate, rx_rate)
-            self.peak_tx_rate = max(self.peak_tx_rate, tx_rate)
-            
-            # Reset counters
-            self.rx_bytes = 0
-            self.tx_bytes = 0
-            self.last_time = current_time
-            
-            # Return a list containing single NetStats message
             return NetStats(
                 interface=self.interface,
-                target_ip=self.target_ip,  # Add target_ip
-                rx_mib=rx_rate / (1024 * 1024),  # Convert to MiB
-                tx_mib=tx_rate / (1024 * 1024),  # Convert to MiB
-                rx_rate=rx_rate,
-                tx_rate=tx_rate,
-                rx_rate_peak=self.peak_rx_rate,
-                tx_rate_peak=self.peak_tx_rate,
+                target_ip=self.target_ip,
+                rx_bytes=self.rx_bytes_total,  # Total bytes
+                tx_bytes=self.tx_bytes_total,  # Total bytes
+                rx_rate=self.rx_bytes_window,  # Rate from current window
+                tx_rate=self.tx_bytes_window
             )
             
         except Exception as e:
@@ -283,13 +268,13 @@ def collector_process(collector, queue, interval):
     """Generic collector process function"""
     while rclpy.ok():
         try:
+            if collector._shutdown:  # Check shutdown flag
+                break
             stats = collector.collect_stats()
-            queue.put(stats)
-            # time.sleep(interval)
-            # print(f"Collector process stats: {stats}, time: {time.time()}")
+            if stats:
+                queue.put(stats)
         except Exception as e:
             print(f"Collector process error: {e}")
-            time.sleep(interval)
 
 
 class SystemResourceMonitor(Node):
@@ -337,31 +322,24 @@ class SystemResourceMonitor(Node):
             # Get latest bandwidth stats if available
             while not self.network_queue.empty():
                 stats = self.network_queue.get_nowait()
-                # Only take the first NetStats object since we expect a list with one item
-                self.latest_net_stats = stats if stats else None
+                self.latest_net_stats = [stats] if stats else None
             
             # Create and publish message
             if self.latest_net_stats or self.latest_docker_stats:
                 sys_msg = SystemStats()
                 sys_msg.header.stamp = self.get_clock().now().to_msg()
                 sys_msg.docker_stats = self.latest_docker_stats or []
-                sys_msg.net_stats = [self.latest_net_stats] or []
+                sys_msg.net_stats = self.latest_net_stats or []
                 self.publisher.publish(sys_msg)
 
-                headers_docker, headers_net, table_data_docker, table_data_net = \
-                    create_stats_table(self.latest_docker_stats, self.latest_net_stats)
                 print("\033[2J\033[H", end="")  # Clear screen and move cursor to top
                 print(f"System Stats - Updated: {time.strftime('%H:%M:%S')}")
                 print("=" * 100)
-                print(tabulate(table_data_docker, headers=headers_docker, tablefmt="grid"))
-                print(tabulate(table_data_net, headers=headers_net, tablefmt="grid"))
+                print_docker_stats_table(self.latest_docker_stats)
+                print_net_stats_table(self.latest_net_stats)
                 
-            # Update network stats display
-            if self.latest_net_stats:
-                print(f"Bandwidth - RX: {format_bandwidth(self.latest_net_stats.rx_rate)}/s, "
-                      f"TX: {format_bandwidth(self.latest_net_stats.tx_rate)}/s")
             else:
-                print("Bandwidth data not available yet")
+                print("No stats available")
             
         except Exception as e:
             self.get_logger().error(f'Error publishing stats: {str(e)}')
@@ -371,22 +349,30 @@ class SystemResourceMonitor(Node):
     def destroy_node(self):
         """Clean up processes when shutting down"""
         try:
+            # Set shutdown flags first
             self._shutdown = True
+            self.docker_collector._shutdown = True
+            self.network_monitor._shutdown = True
             
-            # Terminate collector processes
+            # Cancel timer before process cleanup
+            self.publish_timer.cancel()
+            
+            # Terminate processes
             self.docker_process.terminate()
             self.network_process.terminate()
             
-            # Wait for processes to finish
-            self.docker_process.join(timeout=3.0)
-            self.network_process.join(timeout=3.0)
+            # Brief wait for processes to terminate
+            time.sleep(0.5)
             
-            # Cleanup collectors
+            # Force kill if still running
+            if self.docker_process.is_alive():
+                self.docker_process.kill()
+            if self.network_process.is_alive():
+                self.network_process.kill()
+            
+            # Final cleanup
             self.docker_collector.cleanup()
             self.network_monitor.cleanup()
-            
-            # Cancel publish timer
-            self.publish_timer.cancel()
             
         except Exception as e:
             print(f"Error during shutdown: {e}")
