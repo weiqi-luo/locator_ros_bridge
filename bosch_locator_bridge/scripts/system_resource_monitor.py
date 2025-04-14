@@ -5,7 +5,7 @@ import concurrent.futures
 import rclpy
 from rclpy.node import Node
 from bosch_locator_bridge.msg import NetStats, DockerStats, SystemStats
-from std_msgs.msg import Header
+from std_msgs.msg import HeaderX``w
 import subprocess
 import re
 import threading
@@ -341,11 +341,11 @@ class SystemResourceMonitor(Node):
                 self.latest_net_stats = stats if stats else None
             
             # Create and publish message
-            if self.latest_net_stats and self.latest_docker_stats:
+            if self.latest_net_stats or self.latest_docker_stats:
                 sys_msg = SystemStats()
                 sys_msg.header.stamp = self.get_clock().now().to_msg()
                 sys_msg.docker_stats = self.latest_docker_stats or []
-                sys_msg.net_stats = [self.latest_net_stats]
+                sys_msg.net_stats = [self.latest_net_stats] or []
                 self.publisher.publish(sys_msg)
 
                 headers_docker, headers_net, table_data_docker, table_data_net = \
